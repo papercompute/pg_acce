@@ -43,15 +43,17 @@
 #include <unistd.h>
 #include "pg_acce.h"
 
+#define MAX_WORKERS 128
+
 PG_MODULE_MAGIC;
 
-/* flags set by signal handlers */
-static volatile sig_atomic_t got_sighup = false;
-static volatile sig_atomic_t got_sigterm = false;
+typedef struct
+{
+  
+} acce_worker_t;
 
-/* GUC variables */
-//static int acce_num_workers = 0;
-static int acce_master_worker_setup_counter = 0;
+static int num_workers = 0;
+
 
 
 Datum
@@ -88,136 +90,54 @@ PG_FUNCTION_INFO_V1(acce_ocl_info);
 
 /* Internal functions */
 
-static void
-master_worker_sigterm(SIGNAL_ARGS)
-{
-	int save_errno = errno;
-
-	got_sigterm = true;
-	SetLatch(MyLatch);
-	errno = save_errno;
-}
-
-static void
-master_worker_sighup(SIGNAL_ARGS)
-{
-	int save_errno = errno;
-
-	got_sighup = true;
-	SetLatch(MyLatch);
-	errno = save_errno;
-}
 
 void
-acce_master_worker(Datum main_arg)
+acce_worker(Datum main_arg)
 {
-	elog(LOG,"acce_master_worker enter");
+	int id = DatumGetInt32(main_arg);
+	elog(LOG,"acce_master_worker %d enter",id);
 
-	pqsignal(SIGHUP, master_worker_sighup);
-	pqsignal(SIGTERM, master_worker_sigterm);
 
 	BackgroundWorkerUnblockSignals();
 
-	while (!got_sigterm)
+	while (1)
 	{
-		//int			ret;
-		int			rc;
-
-		rc = WaitLatch(MyLatch,
-					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-					   1 * 1000L);
-		ResetLatch(MyLatch);
-
-		/* emergency bailout if postmaster has died */
-		if (rc & WL_POSTMASTER_DEATH)
-			proc_exit(1);
-
-		/*
-		 * In case of a SIGHUP, just reload the configuration.
-		 */
-		if (got_sighup)
-		{
-			got_sighup = false;
-			//ProcessConfigFile(PGC_SIGHUP);
-		}
-	} // while got_sigterm
-
-
-	elog(LOG,"acce_master_worker exit");
-}
-
-/*
-static void
-acce_setup_master_worker(void)
-{
-	BackgroundWorker worker;
-	if(acce_master_worker_setup_counter>0)
-	{
-		elog(LOG,"acce_master_worker_setup_counter  > 0");
-		return;
+		CHECK_FOR_INTERRUPTS();
 	}
-        acce_master_worker_setup_counter++;
-	elog(LOG,"acce_setup_master_worker enter");
-	memset(&worker, 0, sizeof(BackgroundWorker));
-	strcpy(worker.bgw_name, "acce master worker");
-	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
-	worker.bgw_start_time = BgWorkerStart_PostmasterStart;
-	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_main = acce_master_worker;
-	worker.bgw_main_arg = 0;
-	RegisterBackgroundWorker(&worker);
-	elog(LOG,"acce_setup_master_worker exit");
+
+
+	elog(LOG,"acce_master_worker %d exit",id);
 }
 
-*/
 static void
-acce_setup_master_worker_dynamic(int a)
+acce_add_more_workers_dynamic(int n)
 {
 	BackgroundWorker worker;
 	BackgroundWorkerHandle *handle;
-	BgwHandleStatus status;
-	pid_t		pid;
+//	BgwHandleStatus status;
+//	pid_t		pid;
+	int i;
 
-        if(a!=0)return;
-
-	if(acce_master_worker_setup_counter>0)
-	{
-		elog(LOG,"acce_master_worker_setup_counter  > 0");
-		return;
-	}
-
-	acce_master_worker_setup_counter++;
-
-	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
-		BGWORKER_BACKEND_DATABASE_CONNECTION;
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
 	worker.bgw_main = NULL;
 	sprintf(worker.bgw_library_name, "pg_acce");
-	sprintf(worker.bgw_function_name, "acce_master_worker");
-	snprintf(worker.bgw_name, BGW_MAXLEN, "acce_master_worker");
-	worker.bgw_main_arg = 0;
-	// set bgw_notify_pid so that we can use WaitForBackgroundWorkerStartup
+	sprintf(worker.bgw_function_name, "acce_worker");
+//	snprintf(worker.bgw_name, BGW_MAXLEN, "acce_worker %d", n);
+//	worker.bgw_main_arg = 0;
 	worker.bgw_notify_pid = MyProcPid;
 
-	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
-		return;
+	for (i = 1; i <= n; i++)
+	{
+		snprintf(worker.bgw_name, BGW_MAXLEN, "acce_worker %d", num_workers+i);
+		worker.bgw_main_arg = Int32GetDatum(num_workers+i);
 
-	status = WaitForBackgroundWorkerStartup(handle, &pid);
+		if (!RegisterDynamicBackgroundWorker(&worker, &handle))
+			return;
 
-	if (status == BGWH_STOPPED)
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-				 errmsg("could not start background process"),
-			   errhint("More details may be available in the server log.")));
-	if (status == BGWH_POSTMASTER_DIED)
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-			  errmsg("cannot start background processes without postmaster"),
-				 errhint("Kill all remaining database processes and restart the database.")));
-	Assert(status == BGWH_STARTED);
-
-//	PG_RETURN_INT32(pid);
+		num_workers++;
+	}
 }
 
 
@@ -226,7 +146,7 @@ acce_setup(PG_FUNCTION_ARGS)
 {
 elog(LOG, "acce_setup");
 
-acce_setup_master_worker_dynamic(0);
+acce_add_more_workers_dynamic(3);
 
 PG_RETURN_VOID();
 
