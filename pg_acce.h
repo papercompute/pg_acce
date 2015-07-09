@@ -26,6 +26,13 @@
 
 
 extern Datum acce_info(PG_FUNCTION_ARGS);
+extern Datum acce_mem_info(PG_FUNCTION_ARGS);
+extern Datum acce_ocl_info(PG_FUNCTION_ARGS);
+
+
+extern void acce_master_worker(Datum main_arg);
+
+extern Datum acce_setup(PG_FUNCTION_ARGS);
 
 extern void _PG_init(void);
 
