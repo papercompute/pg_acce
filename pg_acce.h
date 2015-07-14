@@ -13,6 +13,7 @@
 #define PG_ACCE
 
 
+
 #include "storage/dsm.h"
 #include "storage/shm_mq.h"
 #include "storage/spin.h"
@@ -29,6 +30,29 @@ extern Datum acce_setup(PG_FUNCTION_ARGS);
 extern Datum acce_info(PG_FUNCTION_ARGS);
 extern Datum acce_mem_info(PG_FUNCTION_ARGS);
 extern Datum acce_ocl_info(PG_FUNCTION_ARGS);
+
+
+#define ACCE_SHM_MQ_MAGIC		0x3e270d92
+
+typedef struct
+{
+	int		id;
+	slock_t		mutex;
+	int 		cmd;
+	char		param[NAMEDATALEN];
+} acce_worker_params;
+
+typedef struct
+{
+	char		 *name;
+	dsm_segment	 *segment;
+	shm_toc		 *toc;
+	BackgroundWorkerHandle	*handle;
+	PGPROC			*parent;
+	shm_mq_handle		*in_mq;
+	shm_mq_handle		*out_mq;
+	acce_worker_params	*params;
+} acce_worker_data;
 
 #endif
 

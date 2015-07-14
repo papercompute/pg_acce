@@ -1,5 +1,7 @@
 \timing
 
+DROP TABLE IF EXISTS t1;
+
 CREATE TABLE t1 (
     f1 text,
     f2 text
