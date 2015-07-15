@@ -70,13 +70,17 @@ static int	num_workers;
 void _PG_finit(void);
 void _PG_init(void);
 
+void
+acce_worker(Datum args);
+
 
 // Task uname dbname msg
 
 typedef struct WorkerData {
-    int uname_sz;
-    int dbname_sz;
-    int msg_sz;
+	int id;
+	int uname_sz;
+	int dbname_sz;
+	int msg_sz;
 } WorkerData;
 
 
@@ -126,16 +130,55 @@ handle_sigterm(SIGNAL_ARGS)
 }
 
 
+
+
+
+
 void
-acce_worker(Datum main_arg)
+acce_worker(Datum args)
 {
 //	Size		len;
 //	void	   *data;
 //	shm_mq_result res;
 ///	static Latch signalLatch;
 
-	int id = DatumGetInt32(main_arg);
-	elog(LOG,"acce_worker %d enter",id);
+	uint32 seg_arg = DatumGetUInt32( args );
+	WorkerData	*wd;
+	char* uname;
+	char* dbname;
+	char* msg;
+	int j;
+
+	dsm_segment *segment=NULL;
+	ResourceOwner oldowner;
+
+	oldowner = CurrentResourceOwner;
+	CurrentResourceOwner = ResourceOwnerCreate(NULL, "pg_acce");
+
+	segment = dsm_attach( seg_arg );
+	if (segment == NULL)
+		ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("Could not attach to DSM")));
+
+	CurrentResourceOwner = oldowner;
+
+
+	wd = (WorkerData*) palloc ( sizeof(WorkerData) );
+	j=sizeof(WorkerData);
+	memcpy(wd, dsm_segment_address(segment), j);
+
+	uname = (char*) palloc(sizeof(char)*wd->uname_sz);
+	dbname = (char*) palloc(sizeof(char)*wd->dbname_sz);
+	msg = (char*) palloc(sizeof(char)*wd->msg_sz);
+
+	memcpy(uname, 	(char*)dsm_segment_address(segment)+j,wd->uname_sz);
+	j+=wd->uname_sz;
+	memcpy(dbname,  (char*)dsm_segment_address(segment)+j,wd->dbname_sz);
+	j+=wd->dbname_sz;
+	memcpy(msg,  	(char*)dsm_segment_address(segment)+j,wd->msg_sz);
+
+	elog(LOG,"acce_worker %d enter (%s,%s):%s",wd->id, uname, dbname,msg);
 
 	pqsignal(SIGTERM, handle_sigterm);
 	BackgroundWorkerUnblockSignals();
@@ -148,8 +191,11 @@ acce_worker(Datum main_arg)
 	pg_usleep(100000L); // 100 msec
 
 
-
-	elog(LOG,"acce_worker %d exit",id);
+	elog(LOG,"acce_worker %d exit",wd->id);
+	pfree(wd);
+	pfree(uname);
+	pfree(dbname);
+	pfree(msg);
 }
 
 static pid_t
@@ -178,6 +224,8 @@ acce_add_worker_dynamic(char* msg)
 	uname = GetUserNameFromId( GetUserId(),true  );
 	dbname = DatumGetCString(current_database(NULL)) ;
 
+	wd.id	= num_workers++;
+
 	wd.uname_sz	= strlen(uname)+1;
 	wd.dbname_sz	= strlen(dbname)+1;
 	wd.msg_sz	= strlen(msg)+1;
@@ -189,15 +237,15 @@ acce_add_worker_dynamic(char* msg)
 
 	memcpy( dsm_segment_address(segment), &wd,  sizeof(WorkerData));
 	j=sizeof(WorkerData);
-	memcpy( dsm_segment_address(segment)+j, uname,  wd.uname_sz);	
+	memcpy( (char*)dsm_segment_address(segment)+j, uname,  wd.uname_sz);	
 	j+=wd.uname_sz;
-	memcpy( dsm_segment_address(segment)+j, dbname,  wd.dbname_sz);	
+	memcpy( (char*)dsm_segment_address(segment)+j, dbname,  wd.dbname_sz);	
 	j+=wd.dbname_sz;
-	memcpy( dsm_segment_address(segment)+j, msg,  wd.msg_sz);	
+	memcpy( (char*)dsm_segment_address(segment)+j, msg,  wd.msg_sz);	
 
 	CurrentResourceOwner = oldowner;
 
-	snprintf(worker.bgw_name, BGW_MAXLEN, "acce_worker %d", num_workers++);
+	snprintf(worker.bgw_name, BGW_MAXLEN, "acce_worker %d", wd.id);
 	worker.bgw_main_arg = UInt32GetDatum(dsm_segment_handle(segment));
 
 	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
@@ -216,6 +264,7 @@ acce_add_worker_dynamic(char* msg)
 Datum
 acce_setup(PG_FUNCTION_ARGS)
 {
+	int i=0;
 	int32		nworkers = PG_GETARG_INT32(0);
 	if(nworkers<=0 || nworkers>128)
 		PG_RETURN_VOID();
@@ -225,7 +274,10 @@ acce_setup(PG_FUNCTION_ARGS)
 	//acce_add_more_workers_dynamic(nworkers);
 	//acce_add_worker_dynamic("worker1",128,acce_worker);
 	//setup_dynamic_shared_memory(128);
-	acce_add_workers_dynamic(nworkers);
+	for(i=0;i<nworkers;i++)
+	{
+		acce_add_worker_dynamic("hello");
+	}
 
 	//num_workers++;
 
