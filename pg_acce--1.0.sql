@@ -1,4 +1,4 @@
-CREATE FUNCTION acce_setup(pg_catalog.int4)
+CREATE FUNCTION acce_setup(pg_catalog.text)
  RETURNS void
  AS 'MODULE_PATHNAME'
  LANGUAGE C STRICT;

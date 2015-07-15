@@ -132,6 +132,18 @@ handle_sigterm(SIGNAL_ARGS)
 
 
 
+void executeQuery(char* query) 
+{
+    StartTransactionCommand();
+    SetCurrentStatementStartTimestamp();
+    SPI_connect();
+    PushActiveSnapshot(GetTransactionSnapshot());
+    SPI_exec(query, 0);
+    SPI_finish();
+    PopActiveSnapshot();
+    CommitTransactionCommand();
+    ProcessCompletedNotifies();
+}
 
 
 void
@@ -147,7 +159,13 @@ acce_worker(Datum args)
 	char* uname;
 	char* dbname;
 	char* msg;
-	int j;
+	int i,j,ret;
+	bool		isnull;
+	int			ntup;
+	StringInfoData buf;
+	SPITupleTable *coltuptable;
+	int processed;
+
 
 	dsm_segment *segment=NULL;
 	ResourceOwner oldowner;
@@ -164,13 +182,13 @@ acce_worker(Datum args)
 	CurrentResourceOwner = oldowner;
 
 
-	wd = (WorkerData*) palloc ( sizeof(WorkerData) );
+	wd = (WorkerData*) alloca ( sizeof(WorkerData) );
 	j=sizeof(WorkerData);
 	memcpy(wd, dsm_segment_address(segment), j);
 
-	uname = (char*) palloc(sizeof(char)*wd->uname_sz);
-	dbname = (char*) palloc(sizeof(char)*wd->dbname_sz);
-	msg = (char*) palloc(sizeof(char)*wd->msg_sz);
+	uname = (char*) alloca(sizeof(char)*wd->uname_sz);
+	dbname = (char*) alloca(sizeof(char)*wd->dbname_sz);
+	msg = (char*) alloca(sizeof(char)*wd->msg_sz);
 
 	memcpy(uname, 	(char*)dsm_segment_address(segment)+j,wd->uname_sz);
 	j+=wd->uname_sz;
@@ -178,10 +196,59 @@ acce_worker(Datum args)
 	j+=wd->dbname_sz;
 	memcpy(msg,  	(char*)dsm_segment_address(segment)+j,wd->msg_sz);
 
-	elog(LOG,"acce_worker %d enter (%s,%s):%s",wd->id, uname, dbname,msg);
+	ACCE_LOG("acce_worker %d enter (%s,%s):%s\n",wd->id, uname, dbname,msg);
 
 	pqsignal(SIGTERM, handle_sigterm);
 	BackgroundWorkerUnblockSignals();
+	BackgroundWorkerInitializeConnection(dbname, NULL);
+
+	// SPI
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	SPI_connect();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	pgstat_report_activity(STATE_RUNNING, "initializing acce_worker");
+	initStringInfo(&buf);
+	appendStringInfo(&buf,"%s", msg);
+
+	ACCE_LOG("before SPI_execute %s \n",buf.data);
+
+	ret = SPI_execute(buf.data, true, 0);
+	if (ret != SPI_OK_SELECT)
+		ACCE_LOG("SPI_execute failed: error code %d\n", ret);
+
+	ACCE_LOG("SPI_processed=%d\n",SPI_processed);
+
+
+	processed = SPI_processed;
+	coltuptable = SPI_tuptable;
+
+	if (coltuptable != NULL) {
+		for(i = 0; i < processed; i++) {
+		      	for(j = 1; j <= coltuptable->tupdesc->natts; j++) {
+				if (SPI_getvalue(coltuptable->vals[i], coltuptable->tupdesc, j) != NULL) {
+    	   				ACCE_LOG("%s\n",SPI_getvalue(coltuptable->vals[i], coltuptable->tupdesc, j));
+    	  			}
+			}
+		}
+	}
+
+
+	ntup = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+					   SPI_tuptable->tupdesc,
+					   1, &isnull));
+
+	ACCE_LOG("ntop=%d\n",ntup);
+
+	if (isnull)
+		ACCE_LOG("null result");
+
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	pgstat_report_activity(STATE_IDLE, "done acce_worker");
+
+
 
 //	while (1)
 //	{
@@ -192,14 +259,14 @@ acce_worker(Datum args)
 
 
 	elog(LOG,"acce_worker %d exit",wd->id);
-	pfree(wd);
-	pfree(uname);
-	pfree(dbname);
-	pfree(msg);
+//	pfree(wd);
+//	pfree(uname);
+//	pfree(dbname);
+//	pfree(msg);
 }
 
 static pid_t
-acce_add_worker_dynamic(char* msg)
+acce_start_worker(char* msg)
 {
 	BackgroundWorker worker;
 	BackgroundWorkerHandle *handle;
@@ -213,7 +280,7 @@ acce_add_worker_dynamic(char* msg)
 	char* dbname;
 
 
-	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
 	worker.bgw_main = NULL;
@@ -264,20 +331,22 @@ acce_add_worker_dynamic(char* msg)
 Datum
 acce_setup(PG_FUNCTION_ARGS)
 {
-	int i=0;
-	int32		nworkers = PG_GETARG_INT32(0);
-	if(nworkers<=0 || nworkers>128)
-		PG_RETURN_VOID();
+//	int i=0;
+//	int32		nworkers = PG_GETARG_INT32(0);
+//	if(nworkers<=0 || nworkers>128)
+//		PG_RETURN_VOID();
+	text       *msg = PG_GETARG_TEXT_P(0);
 
-	ACCE_LOG("acce_setup %d\n",nworkers);
+	ACCE_LOG("acce_setup\n");
 
 	//acce_add_more_workers_dynamic(nworkers);
 	//acce_add_worker_dynamic("worker1",128,acce_worker);
 	//setup_dynamic_shared_memory(128);
-	for(i=0;i<nworkers;i++)
-	{
-		acce_add_worker_dynamic("hello");
-	}
+//	for(i=0;i<nworkers;i++)
+//	{
+//		acce_add_worker_dynamic("hello");
+//	}
+	acce_start_worker(text_to_cstring(msg));
 
 	//num_workers++;
 
