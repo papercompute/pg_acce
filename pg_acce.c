@@ -227,9 +227,10 @@ acce_worker(Datum args)
 		for(i = 0; i < processed; i++) {
 		      	for(j = 1; j <= coltuptable->tupdesc->natts; j++) {
 				if (SPI_getvalue(coltuptable->vals[i], coltuptable->tupdesc, j) != NULL) {
-    	   				ACCE_LOG("%s\n",SPI_getvalue(coltuptable->vals[i], coltuptable->tupdesc, j));
+    	   				ACCE_LOG("%s",SPI_getvalue(coltuptable->vals[i], coltuptable->tupdesc, j));
     	  			}
 			}
+			ACCE_LOG("\n");
 		}
 	}
 
